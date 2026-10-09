@@ -36,6 +36,8 @@ def detect_kind(data: bytes) -> str | None:
     if first == b"{":
         return "JSON (sing-box?)"
     text = stripped.decode("utf-8", "ignore")
+    if "[Interface]" in text and "[Peer]" in text:
+        return "WireGuard/AmneziaWG .conf"
     if "proxies:" in text:
         return "Clash YAML"
     if "://" in text:
@@ -72,10 +74,17 @@ def fetch_previous(path: str) -> bytes | None:
 
 
 def main() -> int:
+    # Источник конфигурации: файл из приватного репо (SUBS_FILE)
+    # или переменная окружения с секретом (SUBS_JSON)
     try:
-        subs = json.loads(os.environ["SUBS_JSON"])
-    except (KeyError, json.JSONDecodeError):
-        print("::error::SUBS_JSON отсутствует или это невалидный JSON")
+        if os.environ.get("SUBS_FILE"):
+            # utf-8-sig: терпимо к BOM, который Windows-редакторы любят добавлять
+            raw = Path(os.environ["SUBS_FILE"]).read_text(encoding="utf-8-sig")
+        else:
+            raw = os.environ["SUBS_JSON"]
+        subs = json.loads(raw)
+    except (KeyError, OSError, json.JSONDecodeError):
+        print("::error::конфиг подписок не найден или это невалидный JSON")
         return 1
 
     # Маскируем значения в логах (GitHub маскирует только секрет целиком)
