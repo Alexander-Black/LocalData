@@ -51,8 +51,10 @@ def detect_kind(data: bytes) -> str | None:
     return None
 
 
-def fetch(url: str, hwid: str) -> bytes:
-    headers = {"User-Agent": UA}
+def fetch(url: str, hwid: str, ua: str = "") -> bytes:
+    # ua из записи subs.json (необязательное поле) важнее общего SUB_UA:
+    # провайдер часто отдаёт разный формат в зависимости от User-Agent
+    headers = {"User-Agent": ua or UA}
     if hwid:
         headers["x-hwid"] = hwid
     # Если провайдер требует ещё заголовки (x-device-os, x-ver-os, x-device-model),
@@ -106,7 +108,7 @@ def main() -> int:
         name = s.get("name", "?")
         data, source = None, "fresh"
         try:
-            data = fetch(s["url"], s.get("hwid", ""))
+            data = fetch(s["url"], s.get("hwid", ""), s.get("ua", ""))
             if detect_kind(data) is None:
                 print(f"[{name}] ответ не похож на подписку (заглушка?)")
                 data = None
