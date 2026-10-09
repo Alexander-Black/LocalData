@@ -1,0 +1,52 @@
+# .github/workflows/publish-sub.yml
+# Раз в 6 часов скачивает подписку провайдера и публикует её на GitHub Pages
+# по неугадываемому пути. Ни ссылка провайдера, ни содержимое подписки
+# в git НЕ попадают — только в секреты и в артефакт деплоя.
+name: publish-sub
+ 
+on:
+  schedule:
+    - cron: "17 */6 * * *"   # GitHub может задерживать cron на 10-30 мин
+  workflow_dispatch:          # ручной запуск (после смены ссылки провайдера)
+ 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+ 
+concurrency:
+  group: pages
+  cancel-in-progress: true
+ 
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch subscription
+        env:
+          SUB_URL: ${{ secrets.SUB_URL }}     # реальная ссылка провайдера
+          SUB_PATH: ${{ secrets.SUB_PATH }}   # случайная строка, напр. 32+ символов
+        run: |
+          set -euo pipefail
+          mkdir -p "site/$SUB_PATH"
+          # User-Agent влияет на формат ответа у некоторых провайдеров
+          # (base64-список / sing-box JSON / Clash YAML) — при необходимости смени
+          curl -fsSL --retry 3 --max-time 30 -A "v2rayN" "$SUB_URL" -o "site/$SUB_PATH/sub.txt"
+          # пустой/битый ответ = падение job, предыдущая версия на Pages остаётся
+          test -s "site/$SUB_PATH/sub.txt"
+          echo "fetched $(wc -c < "site/$SUB_PATH/sub.txt") bytes"
+          # заглушка, чтобы корень сайта не светил ничего
+          echo "" > site/index.html
+ 
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+ 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/deploy-pages@v4
+ 
