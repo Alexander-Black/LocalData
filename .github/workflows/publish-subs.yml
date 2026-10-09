@@ -23,9 +23,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Приватный репозиторий с конфигом (subs.json), доступ по read-only deploy key
+      - uses: actions/checkout@v4
+        with:
+          repository: Alexander-Black/LocalDataConfig      # <- замени на свой приватный репо
+          ssh-key: ${{ secrets.CONFIG_DEPLOY_KEY }}
+          path: private-config
+          persist-credentials: false
+
       - name: Fetch subscriptions
         env:
-          SUBS_JSON: ${{ secrets.SUBS_JSON }}
+          SUBS_FILE: private-config/subs.json
           # Если репозиторий называется <логин>.github.io, замени на
           # https://${{ github.repository_owner }}.github.io
           PAGES_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
