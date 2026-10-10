@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-Раскладывает подписки по секретным путям:
-    site/<path>/sub.txt          - запись с "url": подписка скачивается у провайдера
-    site/<path>/<имя файла>      - запись с "file": файл берётся из приватного репозитория
-                                   (например AmneziaWG 2.0 .conf), публикуется под своим именем
+Раскладывает подписки по секретным адресам.
+
+Новая схема адресов (у записи в subs.json НЕТ поля "path"):
+    site/subs/<GUID>       - запись с "url":  подписка скачивается у провайдера (VLESS и т.п.)
+    site/configs/<GUID>    - запись с "file": файл из приватного репозитория (AmneziaWG .conf и т.п.)
+GUID - это поле "id" записи; он и есть секрет адреса.
+
+Старая схема (у записи есть "path"):  site/<path>/<id | имя файла | sub.txt>.
+Продолжает работать без изменений, пока запись не переведена на новую схему.
 
 Вход (переменные окружения):
     SUBS_FILE  - путь к JSON-файлу конфига (либо SUBS_JSON - сам JSON)
@@ -11,13 +16,13 @@
     SUB_UA     - User-Agent по умолчанию для запросов к провайдеру (v2rayN)
 
 Формат записи (ровно одно из url / file):
-    {"name": "...", "url": "...", "hwid": "...", "path": "...", "ua": "..."}   # ua необязателен
-    {"name": "...", "file": "configs/mama.conf", "path": "..."}
+    {"name": "...", "url": "...",  "hwid": "...", "id": "<GUID>", "ua": "..."}   # ua необязателен
+    {"name": "...", "file": "configs/mama.conf",  "id": "<GUID>"}
 
 Пути "file" считаются от каталога, где лежит SUBS_FILE.
 
 Важно: репозиторий публичный, логи Actions видны всем. Поэтому скрипт НИКОГДА
-не печатает url / hwid / path / содержимое — только name, размер и тип.
+не печатает url / hwid / path / id / содержимое - только name, размер и тип.
 """
 import base64
 import json
@@ -31,8 +36,41 @@ from pathlib import Path
 SITE = Path("site")
 PAGES_BASE = os.environ.get("PAGES_BASE", "").rstrip("/")
 UA = os.environ.get("SUB_UA", "v2rayN")
-MIN_PATH_LEN = 24  # короткий путь = угадываемая ссылка
+MIN_PATH_LEN = 24  # старая схема: короткий path = угадываемая ссылка
 SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
+ID_RE = re.compile(r"[A-Za-z0-9-]{16,64}")  # id в старой схеме
+GUID_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")  # id в новой схеме
+
+
+def rel_path(s: dict) -> Path:
+    """Куда класть файл относительно site/ (он же адрес на Pages)."""
+    if s.get("path"):  # старая схема
+        name = s.get("id") or (Path(s["file"]).name if s.get("file") else "sub.txt")
+        return Path(s["path"]) / name
+    return Path("configs" if s.get("file") else "subs") / s["id"]
+
+
+def validate(subs: list) -> str | None:
+    """Возвращает текст ошибки или None. Значения секретов в сообщения не попадают."""
+    seen = set()
+    for s in subs:
+        name = s.get("name", "?")
+        if bool(s.get("url")) == bool(s.get("file")):
+            return f"[{name}] нужно указать ровно одно из: url или file"
+        if s.get("path"):  # старая схема
+            if len(s["path"]) < MIN_PATH_LEN:
+                return f"[{name}] path короче {MIN_PATH_LEN} символов"
+            if s.get("id") and not ID_RE.fullmatch(s["id"]):
+                return f"[{name}] id: латиница, цифры и дефис, 16-64 символа"
+            if s.get("file") and not s.get("id") and not SAFE_NAME.fullmatch(Path(s["file"]).name):
+                return f"[{name}] имя файла: только латиница, цифры, . _ -"
+        elif not s.get("id") or not GUID_RE.fullmatch(s["id"]):
+            return f"[{name}] нужен id в формате GUID (или path для старой схемы)"
+        key = rel_path(s).as_posix().lower()
+        if key in seen:
+            return f"[{name}] адрес не уникален (повторяется id или path)"
+        seen.add(key)
+    return None
 
 
 def detect_kind(data: bytes) -> str | None:
@@ -84,12 +122,12 @@ def read_local(rel: str, base_dir: Path) -> bytes:
     return data
 
 
-def fetch_previous(path: str, filename: str) -> bytes | None:
+def fetch_previous(rel: str) -> bytes | None:
     """Последняя опубликованная версия с Pages - запасной вариант при сбое."""
     if not PAGES_BASE:
         return None
     try:
-        with urllib.request.urlopen(f"{PAGES_BASE}/{path}/{filename}", timeout=30) as resp:
+        with urllib.request.urlopen(f"{PAGES_BASE}/{rel}", timeout=30) as resp:
             return resp.read()
     except Exception:
         return None
@@ -111,22 +149,14 @@ def main() -> int:
 
     # Маскируем значения в логах (GitHub маскирует только секрет целиком)
     for s in subs:
-        for key in ("url", "hwid", "path"):
+        for key in ("url", "hwid", "path", "id"):
             if s.get(key):
                 print(f"::add-mask::{s[key]}")
 
-    paths = [s.get("path", "") for s in subs]
-    if len(set(paths)) != len(paths) or any(len(p) < MIN_PATH_LEN for p in paths):
-        print(f"::error::path должен быть уникальным и не короче {MIN_PATH_LEN} символов")
+    error = validate(subs)
+    if error:
+        print(f"::error::{error}")
         return 1
-
-    for s in subs:
-        if bool(s.get("url")) == bool(s.get("file")):
-            print(f"::error::[{s.get('name', '?')}] нужно указать ровно одно из: url или file")
-            return 1
-        if s.get("file") and not SAFE_NAME.fullmatch(Path(s["file"]).name):
-            print(f"::error::[{s.get('name', '?')}] имя файла: только латиница, цифры, . _ -")
-            return 1
 
     SITE.mkdir(exist_ok=True)
     (SITE / "index.html").write_text("")  # пустой корень сайта
@@ -135,7 +165,7 @@ def main() -> int:
     for s in subs:
         name = s.get("name", "?")
         is_file = bool(s.get("file"))
-        fname = Path(s["file"]).name if is_file else "sub.txt"
+        rel = rel_path(s)
         data, source = None, "fresh"
 
         try:
@@ -153,7 +183,7 @@ def main() -> int:
             print(f"[{name}] ошибка: {type(e).__name__}")
 
         if data is None:
-            prev = fetch_previous(s["path"], fname)
+            prev = fetch_previous(rel.as_posix())
             # Для файловой записи достаточно непустого не-HTML ответа
             prev_ok = bool(prev) and (
                 detect_kind(prev) is not None
@@ -166,9 +196,9 @@ def main() -> int:
                 failed.append(name)
                 continue
 
-        out = SITE / s["path"]
-        out.mkdir(parents=True, exist_ok=True)
-        (out / fname).write_bytes(data)
+        out = SITE / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
         print(f"[{name}] {source}: {len(data)} bytes, {detect_kind(data) or 'файл'}")
 
     if failed:
